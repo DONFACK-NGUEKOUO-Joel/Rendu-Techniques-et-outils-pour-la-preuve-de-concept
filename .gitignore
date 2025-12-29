@@ -1,0 +1,10 @@
+*.pcap
+*.zip
+*.pkl
+*.csv
+*.dot
+__pycache__/
+.ipynb_checkpoints/
+__MACOSX/
+~$*
+*.tmp

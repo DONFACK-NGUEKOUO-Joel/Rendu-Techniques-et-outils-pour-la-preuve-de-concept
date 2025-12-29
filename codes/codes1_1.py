@@ -1,0 +1,134 @@
+"""
+GrAMeFFSI - implémentation de base (squelette)
+But: point de départ pour reproduire les expériences de l'article.
+Auteur: généré pour Thibaud
+"""
+
+import networkx as nx
+from utils import is_printable, bytes_to_int_le
+
+class GrAMeFFSI:
+    def __init__(self, min_packets=2):
+        self.min_packets = min_packets
+        self.trees = []  # liste des arbres NetworkX générés
+
+    def process_flows(self, flows):
+        """
+        flows: liste de flux réseau, où chaque flux est une liste de paquets (bytes)
+        """
+        for flow_packets in flows:
+            if len(flow_packets) < self.min_packets:
+                continue
+            tree = self._build_tree_for_flow(flow_packets)
+            self.trees.append(tree)
+        return self.trees
+
+    def _build_tree_for_flow(self, packets):
+        """
+        Construction d'un arbre représentant la structure des messages d’un flux.
+        Implémente les règles de détection :
+          - Constantes (bytes identiques)
+          - Chaînes à longueur en préfixe (1 octet)
+          - Chaînes terminées par NULL
+          - Champs de longueur sur 4 octets (little endian)
+        """
+        G = nx.DiGraph()
+        root = 0
+        G.add_node(root, label="root")
+        node_counter = 1
+
+        ptrs = [0 for _ in packets]
+
+        while any(ptr < len(p) for ptr, p in zip(ptrs, packets)):
+
+            next_bytes = []
+            for i, p in enumerate(packets):
+                if ptrs[i] < len(p):
+                    next_bytes.append(p[ptrs[i]])
+                else:
+                    next_bytes.append(None)
+            if any(b is None for b in next_bytes):
+                break
+
+            # 1️⃣ Constantes : même byte pour tous
+            if all(b == next_bytes[0] for b in next_bytes):
+                G.add_node(node_counter, label=f"CONST({next_bytes[0]:02x})")
+                G.add_edge(root, node_counter)
+                for i in range(len(ptrs)):
+                    ptrs[i] += 1
+                node_counter += 1
+                root = node_counter - 1
+                continue
+
+            # 2️⃣ Chaîne à longueur en préfixe (1 byte)
+            is_len_prefixed = True
+            lengths = []
+            for i, p in enumerate(packets):
+                if ptrs[i] < len(p):
+                    L = p[ptrs[i]]
+                    start = ptrs[i] + 1
+                    end = start + L
+                    if end <= len(p) and all(is_printable(chr(c)) for c in p[start:end]):
+                        lengths.append(L)
+                    else:
+                        is_len_prefixed = False
+                        break
+                else:
+                    is_len_prefixed = False
+                    break
+            if is_len_prefixed and len(lengths) > 0:
+                G.add_node(node_counter, label=f"LENSTR(len={lengths[0]})")
+                G.add_edge(root, node_counter)
+                for i in range(len(ptrs)):
+                    ptrs[i] += 1 + lengths[i]
+                node_counter += 1
+                root = node_counter - 1
+                continue
+
+            # 3️⃣ Chaîne terminée par NULL
+            is_null_term = True
+            n_lengths = []
+            for i, p in enumerate(packets):
+                start = ptrs[i]
+                found = False
+                for j in range(start, len(p)):
+                    if p[j] == 0:
+                        if all(is_printable(chr(c)) for c in p[start:j]):
+                            n_lengths.append(j - start)
+                            found = True
+                        break
+                if not found:
+                    is_null_term = False
+                    break
+            if is_null_term and len(n_lengths) > 0:
+                G.add_node(node_counter, label=f"NULLSTR(len={n_lengths[0]})")
+                G.add_edge(root, node_counter)
+                for i in range(len(ptrs)):
+                    ptrs[i] += n_lengths[i] + 1
+                node_counter += 1
+                root = node_counter - 1
+                continue
+
+            # 4️⃣ Champ longueur 4 octets (little-endian)
+            if all(ptrs[i] + 4 <= len(packets[i]) for i in range(len(packets))):
+                vals = [bytes_to_int_le(packets[i][ptrs[i]:ptrs[i]+4]) for i in range(len(packets))]
+                rems = [len(packets[i]) - (ptrs[i] + 4) for i in range(len(packets))]
+                if all(vals[i] == rems[i] or vals[i] == rems[i] - 1 for i in range(len(vals))):
+                    G.add_node(node_counter, label=f"LEN4({vals[0]})")
+                    G.add_edge(root, node_counter)
+                    for i in range(len(ptrs)):
+                        ptrs[i] += 4
+                    node_counter += 1
+                    root = node_counter - 1
+                    continue
+
+            # 5️⃣ Sinon, inconnu : avancer d’un octet
+            G.add_node(node_counter, label=f"BYTE(unk)")
+            G.add_edge(root, node_counter)
+            for i in range(len(ptrs)):
+                if ptrs[i] < len(packets[i]):
+                    ptrs[i] += 1
+            node_counter += 1
+            root = node_counter - 1
+
+        return G
